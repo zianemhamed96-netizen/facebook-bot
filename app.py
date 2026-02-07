@@ -1,125 +1,147 @@
-import os
 from flask import Flask, request
 import requests
-from bs4 import BeautifulSoup
+import re
+import os
 
-app = Flask(__name__)
+app = Flask(name)
 
-PAGE_ACCESS_TOKEN = os.environ.get('PAGE_ACCESS_TOKEN')
-VERIFY_TOKEN = os.environ.get('VERIFY_TOKEN')
+PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN")
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 
-@app.route('/', methods=['GET'])
-def verify():
-    if request.args.get('hub.mode') == 'subscribe' and request.args.get('hub.verify_token') == VERIFY_TOKEN:
-        return request.args.get('hub.challenge'), 200
-    return "Verification failed", 403
+GRAPH_URL = "https://graph.facebook.com/v16.0/me/messages"
 
-@app.route('/', methods=['POST'])
+
+def send_text_message(recipient_id, message_text):
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": message_text}
+    }
+    return requests.post(
+        GRAPH_URL,
+        params={"access_token": PAGE_ACCESS_TOKEN},
+        json=payload
+    ).json()
+
+
+def send_image_message(recipient_id, image_url):
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "image",
+                "payload": {
+                    "url": image_url,
+                    "is_reusable": True
+                }
+            }
+        }
+    }
+    return requests.post(
+        GRAPH_URL,
+        params={"access_token": PAGE_ACCESS_TOKEN},
+        json=payload
+    ).json()
+
+
+def send_sender_action(recipient_id, action):
+    payload = {
+        "recipient": {"id": recipient_id},
+        "sender_action": action
+    }
+    requests.post(
+        GRAPH_URL,
+        params={"access_token": PAGE_ACCESS_TOKEN},
+        json=payload
+    )
+
+
+def extract_post_data(url):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+
+        image = re.search(
+            r'property="og:image"\s+content="([^"]+)"', response.text)
+        title = re.search(
+            r'property="og:title"\s+content="([^"]+)"', response.text)
+        desc = re.search(
+            r'property="og:description"\s+content="([^"]+)"', response.text)
+
+        return {
+            "title": title.group(1) if title else "منشور فيسبوك",
+            "description": desc.group(1) if desc else "",
+            "image": image.group(1) if image else None
+        }
+    except:
+        return None
+
+
+@app.route("/")
+def home():
+    return "البوت يعمل ✅"
+
+
+@app.route("/webhook", methods=["GET"])
+def verify_webhook():
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return challenge
+    return "فشل", 403
+
+
+@app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    if data['object'] == 'page':
-        for entry in data['entry']:
-            for messaging_event in entry['messaging']:
-                sender_id = messaging_event['sender']['id']
-                if messaging_event.get('message'):
-                    if 'text' in messaging_event['message']:
-                        text = messaging_event['message']['text']
-                        send_sender_action(sender_id, "typing_on")
-                        # التحقق من الرابط
-                        if 'facebook.com' in text or 'fb.com' in text:
-                            handle_link(sender_id, text)
-                        else:
-                            send_text_message(sender_id,
-                                "👋 أهلاً! أرسل لي رابط منشور فيسبوك\n"
-                                "مثال: https://facebook.com/user/posts/123456")
 
-                        send_sender_action(sender_id, "typing_off")
+    if data.get("object") != "page":
+        return "OK", 200
+
+    for entry in data.get("entry", []):
+        for event in entry.get("messaging", []):
+            sender_id = event["sender"]["id"]
+
+            if "message" in event and "text" in event["message"]:
+                text = event["message"]["text"]
+
+                send_sender_action(sender_id, "typing_on")
+
+                if "facebook.com" in text or "fb.com" in text:
+                    handle_link(sender_id, text)
+                else:
+                    send_text_message(
+                        sender_id,
+                        "📎 أرسل رابط منشور فيسبوك عام"
+                    )
+
+                send_sender_action(sender_id, "typing_off")
 
     return "OK", 200
 
+
 def handle_link(sender_id, url):
-    """معالجة رابط المنشور"""
     send_text_message(sender_id, "⏳ جاري جلب المنشور...")
 
     data = extract_post_data(url)
 
     if not data:
-        send_text_message(sender_id, "❌ لم أستطع الوصول للمنشور. تأكد أنه عام.")
+        send_text_message(sender_id, "❌ لم أستطع الوصول للمنشور")
         return
 
-    # إرسال النص
-    message = f"📝 {data['title']}"
-    if data['description']:
-        message += f"\n\n{data['description']}"
+    message = data["title"]
+    if data["description"]:
+        message += "\n\n" + data["description"]
+
     send_text_message(sender_id, message)
 
-    # إرسال الصورة (الجزء المهم!)
-    if data['image']:
-        send_text_message(sender_id, "🖼️ جاري إرسال الصورة...")
-        result = send_image_message(sender_id, data['image'])
+    if data["image"]:
+        send_image_message(sender_id, data["image"])
 
-        if result and 'error' in result:
-            send_text_message(sender_id, f"⚠️ لم أستطع إرسال الصورة مباشرة، لكن يمكنك رؤيتها هنا:\n{data['image']}")
-    else:
-        send_text_message(sender_id, "ℹ️ لا توجد صورة في هذا المنشور")
 
-def send_text_message(recipient_id, message_text):
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "recipient": {"id": recipient_id},
-        "message": {"text": message_text}
-    }
-    response = requests.post("https://graph.facebook.com/v17.0/me/messages", params=params, headers=headers, json=data)
-    return response.json()
-
-def send_sender_action(recipient_id, action):
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "recipient": {"id": recipient_id},
-        "sender_action": action
-    }
-    requests.post("https://graph.facebook.com/v17.0/me/messages", params=params, headers=headers, json=data)
-
-def send_image_message(recipient_id, image_url):
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "recipient": {"id": recipient_id},
-        "message": {
-            "attachment": {
-                "type": "image",
-                "payload": {"url": image_url}
-            }
-        }
-    }
-    response = requests.post("https://graph.facebook.com/v17.0/me/messages", params=params, headers=headers, json=data)
-    return response.json()
-
-def extract_post_data(url):
-    try:
-        response = requests.get(url)
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Extract title
-        title = soup.find('title').text if soup.find('title') else "No title"
-
-        # Extract description (meta description)
-        desc_meta = soup.find('meta', attrs={'name': 'description'})
-        description = desc_meta['content'] if desc_meta else ""
-
-        # Extract image (og:image)
-        og_image = soup.find('meta', attrs={'property': 'og:image'})
-        image = og_image['content'] if og_image else None
-
-        return {
-            'title': title,
-            'description': description,
-            'image': image
-        }
-    except:
-        return None
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+if name == "main":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
