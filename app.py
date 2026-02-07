@@ -3,7 +3,7 @@ import requests
 import re
 import os
 
-app = Flask(name)
+app = Flask(__name__)
 
 PAGE_ACCESS_TOKEN = os.environ.get("PAGE_ACCESS_TOKEN")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
